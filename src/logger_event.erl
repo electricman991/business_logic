@@ -5,6 +5,7 @@
 -export([init/1,terminate/3,code_change/2,start/0]).
 %% event Callbacks
 -export([handle_event/2,handle_info/2,handle_call/2]).
+-include_lib("amqp_client/include/amqp_client.hrl").
 
 %%%===================================================================
 %%% Mandatory callback functions
@@ -24,6 +25,8 @@ init(standard_io)  ->
 init({file, File}) -> 
     {ok, Fd} = file:open(File, write),
     {ok, {Fd, 1}};
+init(rabbitmq) ->
+    {ok, Connection} = amqp_connection:start(#amqp_params_network{host = "localhost"});
 init(Args) ->
     {error, {args, Args}}. 
 

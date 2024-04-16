@@ -22,7 +22,7 @@
 %%%===================================================================
 
 update_location(Data) ->
-    gen_server:cast(?SERVER, {update_location, Data}),
+    gen_server:cast(update_server, {update_for, Data}),
     "ok".
 
 %%--------------------------------------------------------------------
@@ -51,7 +51,6 @@ start() ->
 start(Registration_type,Name,Args) ->
     gen_server:start_link({Registration_type, Name}, ?MODULE, Args, []).
 
-
 %%--------------------------------------------------------------------
 %% @doc
 %% Stops the server gracefully
@@ -76,7 +75,11 @@ stop() -> gen_server:call(?MODULE, stop).
 %%--------------------------------------------------------------------
 -spec init(term()) -> {ok, term()}|{ok, term(), number()}|ignore |{stop, term()}.
 init([]) ->
-        {ok,replace_up}.
+        case riakc_pb_socket:start_link("rdb.parallelcompute.net", 8087) of 
+	        {ok,Riak_Pid} ->
+                {ok,{Riak_Pid,1}};
+	        _ -> {stop,link_failure}
+	    end.
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -114,20 +117,37 @@ handle_call(stop, _From, _State) ->
                                   {noreply, term(), integer()} |
                                   {stop, term(), term()}.
 
-% handle_cast({update_for, Key, []}, State) ->
-%   {noreply, {fail,empty_value}, State};
-
-handle_cast({update_for, Key, Value}, State) ->
-    %io:format("Update request received: ~p~n",[Value]),
-    case {Key, is_binary(Key), Value =/= [] andalso length(Value) == 2} of
+handle_cast({update_for, Data}, State) ->
+    {Riak_Pid, Event} = State,
+    Cordinates = maps:get(<<"cordinates">>, Data, undefined),
+    Key = maps:get(<<"location_id">>, Data, <<"">>),
+    %io:format("Update request received: ~p~n",[Cordinates]),
+    case {Key, is_binary(Key), maps:size(Cordinates) == 2} of
         {<<"">>, _,_} 
-            -> {noreply, {fail,empty_key}, State};
+            -> %io:format("Empty key received~n",[]),
+                %{noreply, #{<<"status">> => fail, error => empty_key}, State};
+                {noreply, State};
         {Key, true, true} 
-            -> {noreply, db_api:put_location_for(Key,Value,State), State};
+            -> JsonCordinates = jsx:encode(Cordinates),
+                %io:format("Made it to database~p~n", [JsonCordinates]),
+                
+                case db_api:put_location_for(Key,JsonCordinates,Riak_Pid) of
+                    ok -> 
+                        %io:format("Data successfully saved~n",[]),
+                        {noreply, {Riak_Pid, Event}};
+                    {ok, _RiakObject} ->
+                        %io:format("Data successfully saved~n",[]),
+                        {noreply, {Riak_Pid, Event}};
+                    {error, _Reason} ->
+                        %io:format("Error saving data: ~p~n",[Reason]),
+                        {noreply, {Riak_Pid, Event}}
+                end;
         {Key, false, _}
-            -> {noreply, {fail, wrong_key}, State};
+            -> %io:format("Wrong key received~n",[]),
+                {noreply, State};
         {Key, _, false}
-            -> {noreply, {fail, wrong_number_of_values}, State}
+            -> %io:format("Wrong number of values received~n",[]),
+                {noreply, State}
     end.
 %%--------------------------------------------------------------------
 %% @private

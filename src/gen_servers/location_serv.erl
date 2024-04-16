@@ -23,7 +23,7 @@
 %%%===================================================================
 %%% 
 get_location(Data) ->
-    gen_server:call(location_server, {get_location, Data}).
+    gen_server:call(location_server, {location_for, Data}).
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server assuming there is only one server started for 
@@ -75,7 +75,10 @@ stop() -> gen_server:call(?MODULE, stop).
 %%--------------------------------------------------------------------
 -spec init(term()) -> {ok, term()}|{ok, term(), number()}|ignore |{stop, term()}.
 init([]) ->
-        {ok,replace_up}.
+        case riakc_pb_socket:start_link("rdb.parallelcompute.net", 8087) of 
+	     {ok,Riak_Pid} -> {ok,{Riak_Pid,1}};
+	     _ -> {stop,link_failure}
+	end.
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -90,27 +93,84 @@ init([]) ->
                                   {noreply, term(), integer()} |
                                   {stop, term(), term(), integer()} | 
                                   {stop, term(), term()}.
-handle_call({get_location, Data}, _From, State) ->
-    gen_event:notify(logger_event, 1),
-    io:format("Location request received: ~p~n",[Data]),
-    {reply, "Location received", State};
 
-handle_call({location_for, Key, Value}, _From, State) ->
-    %gen_event:notify(logger_event, {location_for, Key, Value}),
+% handle_call({get_location, Data}, _From, {Riak_Pid, Event}) ->
+%     gen_event:notify(logger_event, Event),
+%     io:format("Location request received: ~p~n",[Data]),
+%     {reply, "Location received", Event + 1};
+
+% handle_call({get_location, Data}, _From, State) ->
+%     {Riak_Pid, Event} = State,
+%     gen_event:notify(logger_event, Event),
+%     io:format("Location request received: ~p~n",[Data]),
+
+%     {ok, Fetched} = db_api:get_location_for(<<"3d3ce96b-a635-46cd-8bcb-367a9c99c231">>,Riak_Pid),
+%     Value = riakc_obj:get_value(Fetched),
+%     Term = erlang:binary_to_term(Value),
+%     {reply, Term, {Riak_Pid, Event + 1}};
+
+handle_call({location_for, Data}, _From, State) ->
+    {Riak_Pid, Event} = State,
+    Key = maps:get(<<"package_id">>, Data),
+    %gen_event:notify(logger_event, Event),
+    %io:format("Location request received: ~p~n",[Key]),
     case {Key, is_binary(Key)} of
         {<<"">>, _} 
-            -> {reply, {fail,empty_key}, State};
+            -> {reply, #{<<"status">> => fail, error => empty_key}, State};
 
         %% Remove the error trigger case when the db_api is implemented
-        {<<"error_trigger">>, _} 
-            -> {reply, db_api:get_location_for(Key,Value,State), State};
+        % {<<"error_trigger">>, _} 
+        %     -> {reply, db_api:get_location_for(Key,Value,State), State};
         {Key, true} 
-            -> case re:run(Key, <<"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$">>) of
-                {match, _} -> {reply, db_api:get_location_for(Key,Value,State), State};
-                _ -> {reply, {fail, wrong_key}, State}
+            -> case re:run(Key, <<"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$">>) of
+                
+                {match, _} -> 
+                    %io:format("Key: ~p~n",[Key]),
+                    case db_api:get_package_location(Key,Riak_Pid) of
+                        {error, _} -> 
+                            {reply, #{<<"status">> => fail, error => <<"wrong_key: Could not retrieve data for provided Key">>}, State};
+                        {ok, Fetched} ->
+                            Value = riakc_obj:get_value(Fetched),
+                            %io:format("Value: ~p~n",[Value]),
+                            case is_binary(Value) of
+                                true ->
+                                    case db_api:get_location_for(Value, Riak_Pid) of 
+                                        {error, _} -> 
+                                            {reply, #{<<"status">> => fail, error => <<"wrong_key: Could not retrieve location">>}, State};
+                                        {ok, NewFetched} -> 
+                                            NewValue = riakc_obj:get_value(NewFetched),
+                                            case NewValue of
+                                                <<"Delivered">> -> 
+                                                    Map = NewValue;
+                                                _ -> 
+                                                    Map = jsx:decode(NewValue)
+                                                end,
+                                            {reply, #{<<"status">> => success, <<"location">> => Map}, {Riak_Pid, Event + 1}}
+                                            %     _ -> 
+                                            %         Term = erlang:binary_to_term(NewValue),
+                                            %         %Map = jsx:decode(Term, [return_maps]),
+                                            %         %io:format("Map: ~p~n",[Map]),
+                                            %         %Map = maps:from_list(List),
+                                            %         %NewTerm = maps:put(<<"status">>, success, Map)
+                                            %         {reply, #{<<"status">> => success, <<"location">> => Term}, {Riak_Pid, Event + 1}}
+                                            % end
+                                    end;
+                                    
+                                _ -> 
+                                    %Term = erlang:binary_to_term(Value),
+                                    %Map = jsx:decode(Value, [return_maps]),
+                                    %Map = maps:from_list(List),
+                                    %NewTerm = maps:put(<<"status">>, success, Map)
+                                    {reply, #{<<"status">> => fail, <<"error">> => <<"Location_id not stored as binary string value ">>}, {Riak_Pid, Event + 1}}
+                                end
+                        end;
+                    
+                _ -> 
+                    {reply, #{<<"status">> => fail, error => <<"wrong_key: Could not retrieve location">>}, State}
             end;
         {Key, _}
-            -> {reply, {fail, wrong_key}, State}
+            -> 
+                {reply, #{<<"status">> => fail, error => <<"wrong_key: Key is not correct type">>}, State}
     end;
 
 handle_call(stop, _From, _State) ->

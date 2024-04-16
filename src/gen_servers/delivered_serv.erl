@@ -11,7 +11,7 @@
 -define(SERVER, ?MODULE).
 
 %% API
--export([start/0,start/3,stop/0]).
+-export([start/0,start/3,stop/0, package_delivered/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -20,6 +20,9 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
+%%%
+package_delivered(Data) ->
+    gen_server:call(delivered_server, {delivered_for, Data}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -72,7 +75,10 @@ stop() -> gen_server:call(?MODULE, stop).
 %%--------------------------------------------------------------------
 -spec init(term()) -> {ok, term()}|{ok, term(), number()}|ignore |{stop, term()}.
 init([]) ->
-        {ok,replace_up}.
+        case riakc_pb_socket:start_link("rdb.parallelcompute.net", 8087) of 
+	        {ok,Riak_Pid} -> {ok,{Riak_Pid,1}};
+	        _ -> {stop,link_failure}
+	    end.
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -87,23 +93,43 @@ init([]) ->
                                   {noreply, term(), integer()} |
                                   {stop, term(), term(), integer()} | 
                                   {stop, term(), term()}.
-handle_call({delivered_for, Key, Value}, _From, Db_PID) ->
-    case {Key, is_binary(Key), Value =/= []} of
-        {<<"">>, _,_} 
-            -> {reply, {fail,empty_key}, Db_PID};
+handle_call({delivered_for, Data}, _From, State) ->
+    {Riak_Pid, Event} = State,
+    %io:format("Delivered~p~n", [Data]),
+    Key = maps:get(<<"package_id">>, Data, undefined),
+    case {Key, is_binary(Key)} of
+        {<<"">>, _} 
+            -> {reply, #{<<"status">> => fail, message => empty_key}, State};
 
         %% Remove the error trigger case when the db_api is implemented
-        {<<"error_trigger">>,_,_}
-            -> {reply, db_api:put_location_for(Key,Value,Db_PID), Db_PID};
-        {Key, true, true} 
-            -> case re:run(Key, <<"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$">>) of
-                {match, _} -> {reply, db_api:put_location_for(Key,Value,Db_PID), Db_PID};
-                _ -> {reply, {fail, wrong_key}, Db_PID}
+        % {<<"error_trigger">>,_,_}
+        %     -> {reply, db_api:put_location_for(Key,Value,State), State};
+        {Key, true} 
+            ->  case db_api:get_package_location(Key, Riak_Pid) of
+                    {ok, Fetched} -> 
+                        LocationId = riakc_obj:get_value(Fetched);
+                    {error, _} ->
+                        {reply, #{<<"status">> => fail, message=> <<"Could not get package location from database">>}},
+                        LocationId = undefined
+                end,
+        
+                case re:run(Key, "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$") of
+                {match, _} -> 
+                    case db_api:put_location_for(LocationId,<<"Delivered">>,Riak_Pid) of
+                        ok -> 
+                            {reply, #{<<"status">> => success, message => <<"Received location">>}, {Riak_Pid, Event + 1}};
+                        {ok, _RiakObject} -> 
+                            {reply, #{<<"status">> => success, message => <<"Received location">>}, {Riak_Pid, Event + 1}};
+                        {error, Error} -> 
+                            {reply, #{<<"status">> => fail, error => Error}, {Riak_Pid, Event + 1}}
+                    end;
+                _ 
+                    -> {reply, #{<<"status">> => fail, error => wrong_key}, State}
             end;
-        {Key, false, _}
-            -> {reply, {fail, wrong_key}, Db_PID};
-        {Key, true, false}
-            -> {reply, {fail, empty_value}, Db_PID}
+        {Key, _}
+            -> {reply, #{<<"status">> => fail, error => wrong_key}, State}
+        % {Key, true, false}
+        %     -> {reply, #{<<"status">> => fail, error => empty_value}, Db_PID}
     end;
 handle_call(stop, _From, _State) ->
         {stop,normal,

@@ -11,7 +11,7 @@
 -define(SERVER, ?MODULE).
 
 %% API
--export([start/0,start/3,stop/0]).
+-export([start/0,start/3,stop/0, transfer_package/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -21,6 +21,11 @@
 %%% API
 %%%===================================================================
 
+transfer_package(Data) ->
+    Location_id = maps:get(<<"location_id">>, Data, undefined),
+    %io:format("Location_id~p~n", [Location_id]),
+    Package_id = maps:get(<<"package_id">>, Data, undefined),
+    gen_server:call(transfer_server, {transfer_for, Package_id, Location_id}).
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server assuming there is only one server started for 
@@ -72,7 +77,10 @@ stop() -> gen_server:call(?MODULE, stop).
 %%--------------------------------------------------------------------
 -spec init(term()) -> {ok, term()}|{ok, term(), number()}|ignore |{stop, term()}.
 init([]) ->
-        {ok,replace_up}.
+        case riakc_pb_socket:start_link("rdb.parallelcompute.net", 8087) of 
+	     {ok,Riak_Pid} -> {ok,{Riak_Pid,1}};
+	     _ -> {stop,link_failure}
+	end.
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -88,22 +96,46 @@ init([]) ->
                                   {stop, term(), term(), integer()} | 
                                   {stop, term(), term()}.
 handle_call({transfer_for, Key, Value}, _From, State) ->
+    {Riak_Pid, Event} = State,
+    %io:format("Transfer Key: ~p~n Location Key: ~p~n", [Key, Value]),
     case {Key, is_binary(Key), Value =/= [] } of
         {<<"">>, _, _} 
-            -> {reply, {fail,empty_key}, State};
+            -> {reply, #{<<"status">> => fail, message => empty_key}, State};
 
         %% Remove this case when going to production
-        {<<"error_trigger">>, _, _}
-            -> {reply, dp_api:put_package_for(Key,Value,State), State};
+        % {<<"error_trigger">>, _, _}
+        %     -> {reply, dp_api:put_package_for(Key,Value,State), State};
         {Key, true, true} 
-            -> case re:run(Key, <<"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$">>) of
-                {match, _} -> {reply, db_api:put_package_for(Key,Value,State), State};
-                _ -> {reply, {fail, wrong_key}, State}
+            -> case re:run(Key, "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$") of
+                {match, _} -> 
+                    case db_api:put_package_for(Key,Value,Riak_Pid) of
+                        ok ->
+                            case db_api:get_location_for(Value, Riak_Pid) of
+                                ok -> 
+                                    {reply, #{<<"status">> => success, message => <<"Data successfully saved">>}, {Riak_Pid, Event + 1}};
+                                {ok, _RiakObject} ->
+                                    {reply, #{<<"status">> => success, message => <<"Data successfully saved">>}, {Riak_Pid, Event + 1}};
+                                {error, _Error} ->
+                                    Cor = jsx:encode(#{<<"lat">> => 0.00, <<"long">> => 0.00}),
+                                    db_api:put_location_for(Value, Cor, Riak_Pid),
+                                    {reply, #{<<"status">> => success, message => <<"Data successfully saved">>}, {Riak_Pid, Event + 1}}
+                            end;
+                        {ok, _RiakObject} -> 
+                            %gen_event:notify(logger_event, {Key, Value}),
+                            {reply,#{<<"status">> => success, message => <<"Data successfully saved">>},{Riak_Pid, Event + 1}};
+                        {error, Error} ->
+                            %gen_event:notify(logger_event, {Key, Error}),
+                            {reply, #{<<"status">> => fail, error => Error}, State};
+                        _ ->
+                            {reply, #{<<"status">> => fail, error => unknown_error}, State}
+                    end;
+                    
+                _ -> {reply, #{<<"status">> => fail, error => <<"wrong_key: could not transfer package">>}, State}
             end;
         {Key, false, _}
-            -> {reply, {fail, wrong_key}, State};
+            -> {reply, #{<<"status">> => fail, error => <<"wrong_key: Key is not correct type">>}, State};
         {Key, true, false}
-            -> {reply, {fail, empty_value}, State}
+            -> {reply, #{<<"status">> => fail, error => <<"empty_value: No Value provided, could not transfer package">>}, State}
     end;
 handle_call(stop, _From, _State) ->
         {stop,normal,
