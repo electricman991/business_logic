@@ -5,6 +5,10 @@ Built using gen_servers and supervisors to provide the logic for interacting wit
 
 ![image](https://github.com/user-attachments/assets/3adf1128-068f-43c7-b595-97b6bcf17e46)
 
+Overview of Supervisor layout 
+![image](https://github.com/user-attachments/assets/15ede29c-3a71-494c-9326-90a15e8b8801)
+
+
 Start the backend logic with this command
 ```bash
 rebar3 shell --name business_logic@business.parallelcompute.net --setcookie secret
