@@ -11,7 +11,7 @@ Overview of Supervisor layout
 
 Start the backend logic with this command
 ```bash
-rebar3 shell --name business_logic@business.parallelcompute.net --setcookie secret
+rebar3 shell --name business_logic@<IP or URL of server to connect to> --setcookie secret
 ```
 This command will start the node business_logic at the specified domain. This will allow for erpc to make calls from the frontend_service.
 
